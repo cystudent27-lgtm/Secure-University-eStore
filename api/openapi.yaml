@@ -1,0 +1,1871 @@
+
+openapi: 3.0.3
+
+info:
+  title: Secure University e-Store API
+  version: 1.2.0
+  description: |
+    Draft REST API specification for the Secure University e-Store.
+    This API supports customer and vendor operations, product management,
+    shopping carts, orders, simulated payments, reviews, and administration.
+
+    Security requirements:
+    - Authenticated endpoints use secure session cookies.
+    - State-changing authenticated requests require CSRF protection.
+    - Vendor and administrator accounts require TOTP MFA.
+    - Authorization and resource ownership are checked on every request.
+    - Payment confirmation relies only on verified PayLab notifications.
+    - External product images are validated and fetched through a restricted
+      image-fetching component.
+
+servers:
+  - url: http://localhost/api/v1
+    description: Local development server (HTTPS will be configured through Nginx)
+
+tags:
+  - name: Authentication
+  - name: Products
+  - name: Vendor
+  - name: Cart
+  - name: Orders
+  - name: Payments
+  - name: Reviews
+  - name: Administration
+  - name: Security Auditor
+
+paths:
+
+  /auth/register:
+    post:
+      tags: [Authentication]
+      summary: Register a customer account
+      description: |
+        Public registration creates CUSTOMER accounts only.
+        Vendor, Store Administrator, and Security Auditor roles must not
+        be assigned through this endpoint.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RegisterRequest'
+      responses:
+        '201':
+          description: Customer account created successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '409':
+          description: Email already exists
+
+  /auth/login:
+    post:
+      tags: [Authentication]
+      summary: Authenticate a user
+      description: |
+        Authenticates the user's credentials.
+
+        Vendor and administrator accounts must complete TOTP MFA
+        before a fully authenticated session is established.
+
+        When MFA is required, the response contains a short-lived
+        MFA challenge token. No authenticated session is issued
+        until MFA verification succeeds.
+
+        Login attempts must be rate-limited and account lockout
+        protections must be applied where appropriate.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+      responses:
+        '200':
+          description: |
+            Credentials accepted. MFA may still be required.
+            A session cookie is issued only when all required
+            authentication steps have been completed.
+          headers:
+            Set-Cookie:
+              description: |
+                Present only when a fully authenticated session
+                has been established. The cookie must use HttpOnly,
+                Secure, and an appropriate SameSite attribute.
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LoginResponse'
+        '401':
+          description: Invalid credentials
+        '403':
+          description: Account temporarily locked or access denied
+        '429':
+          description: Too many login attempts
+
+  /auth/mfa/verify:
+    post:
+      tags: [Authentication]
+      summary: Verify TOTP multi-factor authentication
+      description: |
+        Verifies the TOTP code using a short-lived MFA challenge token.
+        A fully authenticated session is established only after successful
+        MFA verification.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MfaVerifyRequest'
+      responses:
+        '200':
+          description: MFA verification successful and session established
+          headers:
+            Set-Cookie:
+              description: |
+                Secure authenticated session cookie using HttpOnly,
+                Secure, and an appropriate SameSite attribute.
+              schema:
+                type: string
+        '400':
+          description: Missing or malformed MFA challenge
+        '401':
+          description: Invalid or expired MFA code or challenge
+        '429':
+          description: Too many MFA verification attempts
+
+  /auth/logout:
+    post:
+      tags: [Authentication]
+      summary: Log out the current user
+      parameters:
+        - $ref: '#/components/parameters/CSRFToken'
+      responses:
+        '200':
+          description: Session invalidated successfully
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /auth/me:
+    get:
+      tags: [Authentication]
+      summary: Get current authenticated user
+      responses:
+        '200':
+          description: Current user information
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /auth/password/forgot:
+    post:
+      tags: [Authentication]
+      summary: Request a password reset
+      description: |
+        Requests a password reset using the account email.
+        The response must not reveal whether the email exists.
+        Requests must be rate-limited.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email]
+              properties:
+                email:
+                  type: string
+                  format: email
+      responses:
+        '200':
+          description: Password reset request processed
+        '429':
+          description: Too many password reset requests
+
+  /auth/password/reset:
+    post:
+      tags: [Authentication]
+      summary: Reset password using a single-use token
+      description: |
+        The reset token must be single-use and expire within 15 minutes.
+        Successful password reset invalidates existing user sessions.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token, new_password]
+              properties:
+                token:
+                  type: string
+                new_password:
+                  type: string
+                  format: password
+                  minLength: 12
+      responses:
+        '200':
+          description: Password reset successfully
+        '400':
+          description: Invalid, expired, or previously used reset token
+
+  /products:
+    get:
+      tags: [Products]
+      summary: List available products
+      description: |
+        Returns only products that are approved for publication
+        and currently available for public browsing.
+      security: []
+      parameters:
+        - name: category_id
+          in: query
+          schema:
+            type: integer
+            format: int64
+        - name: search
+          in: query
+          schema:
+            type: string
+            maxLength: 200
+        - name: page
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            default: 1
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+      responses:
+        '200':
+          description: Product list
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Product'
+
+  /products/{productId}:
+    get:
+      tags: [Products]
+      summary: Get product details
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/ProductId'
+      responses:
+        '200':
+          description: Product details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Product'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /vendor/products:
+    get:
+      tags: [Vendor]
+      summary: List products owned by the current vendor
+      responses:
+        '200':
+          description: Vendor products
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Product'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+    post:
+      tags: [Vendor]
+      summary: Create a product
+      description: |
+        Only approved vendors may create products.
+
+        Product images are supplied as external HTTPS URLs.
+        Direct image file uploads and XML/CSV catalogue imports
+        are not supported by this API.
+
+        Image URLs must use approved hostnames and pass secure
+        image-fetching validation. The backend must not fetch
+        arbitrary URLs directly.
+      parameters:
+        - $ref: '#/components/parameters/CSRFToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProductCreate'
+      responses:
+        '201':
+          description: Product created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Product'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /vendor/products/{productId}:
+    patch:
+      tags: [Vendor]
+      summary: Update an owned product
+      description: |
+        A vendor may update only products they own.
+
+        Image URLs must use HTTPS, belong to an approved hostname,
+        and pass secure image-fetching validation.
+      parameters:
+        - $ref: '#/components/parameters/ProductId'
+        - $ref: '#/components/parameters/CSRFToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProductUpdate'
+      responses:
+        '200':
+          description: Product updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Product'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /vendor/orders:
+    get:
+      tags: [Vendor]
+      summary: List orders containing the current vendor's products
+      description: |
+        Vendors may view only order items associated with their own products.
+        The backend must not expose unrelated products or unnecessary
+        customer personal information.
+      parameters:
+        - name: page
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            default: 1
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+      responses:
+        '200':
+          description: Orders containing the vendor's products
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/VendorOrder'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /cart:
+    get:
+      tags: [Cart]
+      summary: Get the current customer's shopping cart
+      responses:
+        '200':
+          description: Shopping cart
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Cart'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+    put:
+      tags: [Cart]
+      summary: Add or update a cart item
+      description: |
+        The backend validates product availability, quantity, and stock.
+        Prices are retrieved from the database and are never trusted
+        from client-submitted values.
+      parameters:
+        - $ref: '#/components/parameters/CSRFToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CartItemRequest'
+      responses:
+        '200':
+          description: Cart updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Cart'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          description: Product stock unavailable
+
+  /cart/items/{productId}:
+    delete:
+      tags: [Cart]
+      summary: Remove a product from the cart
+      parameters:
+        - $ref: '#/components/parameters/ProductId'
+        - $ref: '#/components/parameters/CSRFToken'
+      responses:
+        '200':
+          description: Cart item removed
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /orders:
+    post:
+      tags: [Orders]
+      summary: Create an order and initiate payment
+      description: |
+        The backend validates the cart and stock, calculates the subtotal,
+        discount, and total, and creates an order with PENDING_PAYMENT status.
+
+        It also creates a PENDING payment record before initiating PayLab.
+        The client cannot submit or override the final order total.
+
+        The shipping address is validated by the backend and retained
+        as an order-specific snapshot.
+
+        Stock and coupon usage must be handled safely using database
+        transactions to prevent concurrent overselling or coupon overuse.
+
+        Payment confirmation must be received through a verified PayLab
+        notification. A browser redirect is not proof of payment.
+      parameters:
+        - $ref: '#/components/parameters/CSRFToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OrderCreateRequest'
+      responses:
+        '201':
+          description: Order created and payment initiation started
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrderCreationResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          description: Product stock or coupon usage unavailable
+
+    get:
+      tags: [Orders]
+      summary: List orders belonging to the current customer
+      description: |
+        Customers may retrieve only their own orders.
+      responses:
+        '200':
+          description: Customer orders
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Order'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /orders/{orderId}:
+    get:
+      tags: [Orders]
+      summary: Get order details and current status
+      description: |
+        Customers can access only their own orders.
+
+        Vendors can access only order information related to their own
+        products, according to their permissions.
+
+        Customers may periodically poll this authenticated REST endpoint
+        to retrieve updated order status.
+
+        Ownership and authorization must be checked on every request.
+        The backend must not rely only on a client-supplied order ID.
+
+        Polling should stop when the order reaches a final state
+        (DELIVERED, CANCELLED, or REFUNDED) or when the customer
+        leaves the order page.
+
+        This endpoint is read-only and does not allow clients
+        to change order status.
+      parameters:
+        - $ref: '#/components/parameters/OrderId'
+      responses:
+        '200':
+          description: Order details and items
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Order'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /payments/{paymentId}:
+    get:
+      tags: [Payments]
+      summary: Get payment status
+      description: |
+        Users may access payment information only when authorized
+        for the associated order.
+      parameters:
+        - $ref: '#/components/parameters/PaymentId'
+      responses:
+        '200':
+          description: Payment status and transaction details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Payment'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /payments/webhook:
+    post:
+      tags: [Payments]
+      summary: Receive a PayLab payment webhook
+      description: |
+        This endpoint receives payment notifications from PayLab.
+
+        The backend must verify the HMAC-SHA256 signature against the
+        original raw request body, not a re-serialized JSON payload.
+
+        The timestamp must be checked for freshness and must fall
+        within the allowed five-minute window.
+
+        The event ID in the request body must match the
+        X-PayLab-Event-Id header and must not have been processed before.
+
+        The backend must verify the payment reference, order reference,
+        amount, and currency against the existing pending payment record.
+
+        Duplicate or invalid events must be rejected.
+        Payment processing must be idempotent.
+
+        Only a verified successful payment webhook may update a payment
+        to VERIFIED and its associated order to PAID.
+
+        A valid failure event may update the payment to FAILED.
+
+        Browser redirects must never be treated as payment confirmation.
+      security: []
+      parameters:
+        - name: X-PayLab-Signature
+          in: header
+          required: true
+          schema:
+            type: string
+        - name: X-PayLab-Timestamp
+          in: header
+          required: true
+          schema:
+            type: string
+        - name: X-PayLab-Event-Id
+          in: header
+          required: true
+          schema:
+            type: string
+            maxLength: 100
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PaymentWebhook'
+      responses:
+        '200':
+          description: Webhook processed successfully
+        '400':
+          description: Invalid webhook payload or timestamp
+        '401':
+          description: Invalid webhook signature
+        '409':
+          description: Duplicate or previously processed event
+
+  /products/{productId}/reviews:
+    get:
+      tags: [Reviews]
+      summary: List product reviews
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/ProductId'
+      responses:
+        '200':
+          description: Product reviews
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Review'
+
+    post:
+      tags: [Reviews]
+      summary: Create a product review
+      description: |
+        Only customers who purchased the product may submit a review.
+
+        The backend must verify that:
+        - The order item exists.
+        - The order item belongs to the product identified by productId.
+        - The order belongs to the currently authenticated customer.
+        - The customer has not already reviewed this purchased item.
+
+        Review comments must be safely validated and sanitized before display.
+      parameters:
+        - $ref: '#/components/parameters/ProductId'
+        - $ref: '#/components/parameters/CSRFToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReviewCreate'
+      responses:
+        '201':
+          description: Review created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Review'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          description: Review already exists for this purchased item
+
+  /admin/users:
+    get:
+      tags: [Administration]
+      summary: List system users
+      description: |
+        Only authorized Store Administrators may view user accounts.
+        Password hashes and MFA secrets must never be returned.
+      parameters:
+        - name: page
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            default: 1
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+      responses:
+        '200':
+          description: User accounts
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/AdminUser'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /admin/users/{userId}/status:
+    patch:
+      tags: [Administration]
+      summary: Activate or deactivate a user account
+      parameters:
+        - name: userId
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+        - $ref: '#/components/parameters/CSRFToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [is_active]
+              properties:
+                is_active:
+                  type: boolean
+      responses:
+        '200':
+          description: User account status updated
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /admin/vendors/{vendorId}/approve:
+    post:
+      tags: [Administration]
+      summary: Approve a vendor
+      description: Only authorized Store Administrators may approve vendors.
+      parameters:
+        - name: vendorId
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+        - $ref: '#/components/parameters/CSRFToken'
+      responses:
+        '200':
+          description: Vendor approved
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /admin/vendors/{vendorId}/status:
+    patch:
+      tags: [Administration]
+      summary: Update vendor approval status
+      description: |
+        Only Store Administrators may reject or suspend a vendor.
+        Vendor status must be one of PENDING, APPROVED, REJECTED, or SUSPENDED.
+      parameters:
+        - name: vendorId
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+        - $ref: '#/components/parameters/CSRFToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [approval_status]
+              properties:
+                approval_status:
+                  type: string
+                  enum: [PENDING, APPROVED, REJECTED, SUSPENDED]
+      responses:
+        '200':
+          description: Vendor status updated
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /admin/categories:
+    get:
+      tags: [Administration]
+      summary: List product categories
+      security: []
+      responses:
+        '200':
+          description: Product categories
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Category'
+
+    post:
+      tags: [Administration]
+      summary: Create a category
+      parameters:
+        - $ref: '#/components/parameters/CSRFToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CategoryCreate'
+      responses:
+        '201':
+          description: Category created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Category'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          description: Category name already exists
+
+  /admin/categories/{categoryId}:
+    patch:
+      tags: [Administration]
+      summary: Update a category
+      parameters:
+        - name: categoryId
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+        - $ref: '#/components/parameters/CSRFToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CategoryUpdate'
+      responses:
+        '200':
+          description: Category updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Category'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /admin/coupons:
+    post:
+      tags: [Administration]
+      summary: Create a coupon
+      description: Only authorized Store Administrators may create coupons.
+      parameters:
+        - $ref: '#/components/parameters/CSRFToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CouponCreate'
+      responses:
+        '201':
+          description: Coupon created
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          description: Coupon code already exists
+
+  /admin/orders/{orderId}/refund:
+    post:
+      tags: [Administration]
+      summary: Request a full refund for a paid order
+      description: |
+        Only authorized Store Administrators may request a full refund.
+
+        The refund applies to the full verified payment amount.
+        The client must not submit a refund amount.
+
+        A reason is required and the operation must be recorded
+        in the append-only audit log.
+
+        The order and payment must be marked REFUNDED only after
+        successful confirmation from PayLab.
+
+        Refund processing must be protected against duplicate requests.
+      parameters:
+        - $ref: '#/components/parameters/OrderId'
+        - $ref: '#/components/parameters/CSRFToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [reason]
+              properties:
+                reason:
+                  type: string
+                  minLength: 3
+                  maxLength: 1000
+      responses:
+        '200':
+          description: Full refund successfully confirmed by PayLab
+        '202':
+          description: Refund request accepted and awaiting PayLab confirmation
+        '400':
+          description: Invalid refund reason or order state
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: Order is not eligible for a refund or refund already processed
+
+  /auditor/audit-logs:
+    get:
+      tags: [Security Auditor]
+      summary: View administrative audit logs
+      description: Read-only access for authorized Security Auditors.
+      parameters:
+        - name: page
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            default: 1
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+      responses:
+        '200':
+          description: Audit log entries
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/AuditLog'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /auditor/security-events:
+    get:
+      tags: [Security Auditor]
+      summary: View security events
+      description: Read-only access for authorized Security Auditors.
+      parameters:
+        - name: page
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            default: 1
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+      responses:
+        '200':
+          description: Security event entries
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/SecurityEvent'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+components:
+
+  securitySchemes:
+    sessionAuth:
+      type: apiKey
+      in: cookie
+      name: session
+
+  parameters:
+    ProductId:
+      name: productId
+      in: path
+      required: true
+      schema:
+        type: integer
+        format: int64
+
+    OrderId:
+      name: orderId
+      in: path
+      required: true
+      schema:
+        type: integer
+        format: int64
+
+    PaymentId:
+      name: paymentId
+      in: path
+      required: true
+      schema:
+        type: integer
+        format: int64
+
+    CSRFToken:
+      name: X-CSRF-Token
+      in: header
+      required: true
+      description: |
+        Required for authenticated state-changing requests.
+        The token must be validated by the backend and must be
+        associated with the authenticated session.
+      schema:
+        type: string
+
+  responses:
+    BadRequest:
+      description: Invalid request or validation failure
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+
+    Unauthorized:
+      description: Authentication required or session invalid
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+
+    Forbidden:
+      description: User does not have permission to perform this operation
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+
+    NotFound:
+      description: Requested resource was not found
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+
+  schemas:
+
+    RegisterRequest:
+      type: object
+      required: [full_name, email, password]
+      properties:
+        full_name:
+          type: string
+          minLength: 2
+          maxLength: 150
+        email:
+          type: string
+          format: email
+        password:
+          type: string
+          format: password
+          minLength: 12
+
+    LoginRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email:
+          type: string
+          format: email
+        password:
+          type: string
+          format: password
+
+    LoginResponse:
+      type: object
+      required: [message, requires_mfa]
+      properties:
+        message:
+          type: string
+        requires_mfa:
+          type: boolean
+        mfa_challenge_token:
+          type: string
+          description: Short-lived token used only to complete MFA.
+        user:
+          $ref: '#/components/schemas/User'
+
+    MfaVerifyRequest:
+      type: object
+      required: [mfa_challenge_token, code]
+      properties:
+        mfa_challenge_token:
+          type: string
+        code:
+          type: string
+          minLength: 6
+          maxLength: 6
+          pattern: '^[0-9]{6}$'
+
+    User:
+      type: object
+      properties:
+        user_id:
+          type: integer
+          format: int64
+          readOnly: true
+        full_name:
+          type: string
+        email:
+          type: string
+          format: email
+        role:
+          type: string
+          enum:
+            - CUSTOMER
+            - VENDOR
+            - STORE_ADMIN
+            - SECURITY_AUDITOR
+        is_active:
+          type: boolean
+          description: Maps to USERS.is_active.
+
+    AdminUser:
+      type: object
+      description: Administrative user view; excludes password hashes and MFA secrets.
+      properties:
+        user_id:
+          type: integer
+          format: int64
+          readOnly: true
+        full_name:
+          type: string
+        email:
+          type: string
+          format: email
+        role:
+          type: string
+          enum: [CUSTOMER, VENDOR, STORE_ADMIN, SECURITY_AUDITOR]
+        is_active:
+          type: boolean
+        mfa_enabled:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+
+    Product:
+      type: object
+      properties:
+        product_id:
+          type: integer
+          format: int64
+        vendor_id:
+          type: integer
+          format: int64
+        category_id:
+          type: integer
+          format: int64
+        product_name:
+          type: string
+          maxLength: 200
+        description:
+          type: string
+        price:
+          type: number
+          multipleOf: 0.01
+          minimum: 0.01
+        stock_quantity:
+          type: integer
+          minimum: 0
+        image_url:
+          type: string
+          format: uri
+          nullable: true
+          description: |
+            Optional external image URL. Must use HTTPS and an approved
+            hostname. It must be validated and fetched only through the
+            secure image-fetching component.
+
+            Localhost, private IP ranges, link-local addresses, and unsafe
+            redirect destinations must be rejected. The image fetcher must
+            enforce destination IP validation, response size limits,
+            timeouts, and content-type validation.
+        product_status:
+          type: string
+          enum: [DRAFT, PUBLISHED, UNPUBLISHED, SUSPENDED]
+
+    ProductCreate:
+      type: object
+      required: [category_id, product_name, price, stock_quantity]
+      properties:
+        category_id:
+          type: integer
+          format: int64
+        product_name:
+          type: string
+          minLength: 2
+          maxLength: 200
+        description:
+          type: string
+        price:
+          type: number
+          multipleOf: 0.01
+          minimum: 0.01
+        stock_quantity:
+          type: integer
+          minimum: 0
+        image_url:
+          type: string
+          format: uri
+          nullable: true
+          description: |
+            Optional HTTPS URL from an approved external hostname.
+            Must pass secure image-fetching validation.
+
+    ProductUpdate:
+      type: object
+      minProperties: 1
+      properties:
+        category_id:
+          type: integer
+          format: int64
+        product_name:
+          type: string
+          minLength: 2
+          maxLength: 200
+        description:
+          type: string
+        price:
+          type: number
+          multipleOf: 0.01
+          minimum: 0.01
+        stock_quantity:
+          type: integer
+          minimum: 0
+        image_url:
+          type: string
+          format: uri
+          nullable: true
+          description: |
+            Optional HTTPS URL from an approved external hostname.
+            Must pass secure image-fetching validation.
+
+    Category:
+      type: object
+      properties:
+        category_id:
+          type: integer
+          format: int64
+          readOnly: true
+        category_name:
+          type: string
+          maxLength: 100
+        description:
+          type: string
+          nullable: true
+        is_active:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+
+    CategoryCreate:
+      type: object
+      required: [category_name]
+      properties:
+        category_name:
+          type: string
+          minLength: 2
+          maxLength: 100
+        description:
+          type: string
+          nullable: true
+
+    CategoryUpdate:
+      type: object
+      minProperties: 1
+      properties:
+        category_name:
+          type: string
+          minLength: 2
+          maxLength: 100
+        description:
+          type: string
+          nullable: true
+        is_active:
+          type: boolean
+
+    Cart:
+      type: object
+      properties:
+        cart_id:
+          type: integer
+          format: int64
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/CartItem'
+        total:
+          type: number
+          multipleOf: 0.01
+          readOnly: true
+          description: Calculated by the backend from current product prices.
+
+    CartItem:
+      type: object
+      properties:
+        product_id:
+          type: integer
+          format: int64
+        product_name:
+          type: string
+          readOnly: true
+          description: Retrieved from PRODUCTS; not a stored CART_ITEMS column.
+        quantity:
+          type: integer
+          minimum: 1
+        unit_price:
+          type: number
+          multipleOf: 0.01
+          readOnly: true
+          description: Retrieved from current product price in PRODUCTS.
+
+    CartItemRequest:
+      type: object
+      required: [product_id, quantity]
+      properties:
+        product_id:
+          type: integer
+          format: int64
+        quantity:
+          type: integer
+          minimum: 1
+
+    ShippingAddress:
+      type: object
+      description: |
+        Validated shipping address stored as an order-specific snapshot.
+      required:
+        - recipient_name
+        - phone
+        - address_line
+        - city
+        - country
+      properties:
+        recipient_name:
+          type: string
+          minLength: 2
+          maxLength: 150
+        phone:
+          type: string
+          maxLength: 30
+        address_line:
+          type: string
+          minLength: 5
+          maxLength: 500
+        city:
+          type: string
+          maxLength: 100
+        country:
+          type: string
+          maxLength: 100
+
+    OrderCreateRequest:
+      type: object
+      required: [shipping_address]
+      properties:
+        coupon_code:
+          type: string
+          nullable: true
+        shipping_address:
+          $ref: '#/components/schemas/ShippingAddress'
+
+    OrderItem:
+      type: object
+      required:
+        - order_item_id
+        - product_id
+        - product_name
+        - quantity
+        - unit_price
+        - line_total
+      properties:
+        order_item_id:
+          type: integer
+          format: int64
+          readOnly: true
+        product_id:
+          type: integer
+          format: int64
+          readOnly: true
+        product_name:
+          type: string
+          readOnly: true
+          description: Product name snapshot returned for order history.
+        quantity:
+          type: integer
+          minimum: 1
+          readOnly: true
+        unit_price:
+          type: number
+          multipleOf: 0.01
+          minimum: 0.01
+          readOnly: true
+        line_total:
+          type: number
+          multipleOf: 0.01
+          minimum: 0
+          readOnly: true
+
+    Order:
+      type: object
+      description: |
+        Represents a customer order and its purchased items.
+        API field names may differ from database column names,
+        as documented in the property descriptions.
+      required:
+        - order_id
+        - status
+        - subtotal
+        - discount_amount
+        - total_amount
+        - shipping_address
+        - items
+        - created_at
+      properties:
+        order_id:
+          type: integer
+          format: int64
+          readOnly: true
+        customer_id:
+          type: integer
+          format: int64
+          readOnly: true
+          description: References ORDERS.customer_id.
+        coupon_id:
+          type: integer
+          format: int64
+          nullable: true
+          readOnly: true
+          description: References ORDERS.coupon_id.
+        status:
+          type: string
+          readOnly: true
+          description: Maps to ORDERS.order_status.
+          enum:
+            - CREATED
+            - PENDING_PAYMENT
+            - PAID
+            - SHIPPED
+            - DELIVERED
+            - CANCELLED
+            - REFUNDED
+        subtotal:
+          type: number
+          multipleOf: 0.01
+          minimum: 0
+          readOnly: true
+        discount_amount:
+          type: number
+          multipleOf: 0.01
+          minimum: 0
+          readOnly: true
+        total_amount:
+          type: number
+          multipleOf: 0.01
+          minimum: 0
+          readOnly: true
+        shipping_address:
+          description: Maps to ORDERS.shipping_address_snapshot JSON column.
+          allOf:
+            - $ref: '#/components/schemas/ShippingAddress'
+          readOnly: true
+        items:
+          type: array
+          readOnly: true
+          items:
+            $ref: '#/components/schemas/OrderItem'
+        created_at:
+          type: string
+          format: date-time
+          readOnly: true
+        updated_at:
+          type: string
+          format: date-time
+          readOnly: true
+
+    VendorOrder:
+      type: object
+      description: |
+        Restricted order view containing only the current vendor's order items
+        and the minimum customer/order information required for fulfillment.
+      properties:
+        order_id:
+          type: integer
+          format: int64
+          readOnly: true
+        status:
+          type: string
+          enum: [PAID, SHIPPED, DELIVERED, CANCELLED, REFUNDED]
+          readOnly: true
+        created_at:
+          type: string
+          format: date-time
+          readOnly: true
+        items:
+          type: array
+          readOnly: true
+          items:
+            $ref: '#/components/schemas/OrderItem'
+
+    OrderCreationResponse:
+      type: object
+      properties:
+        order:
+          $ref: '#/components/schemas/Order'
+        payment_id:
+          type: integer
+          format: int64
+        checkout_url:
+          type: string
+          format: uri
+          description: Simulated PayLab hosted payment page.
+
+    Payment:
+      type: object
+      description: |
+        Represents a payment transaction.
+        The API property status maps to the payment_status column
+        in the PAYMENTS database table.
+      required:
+        - payment_id
+        - order_id
+        - payment_reference
+        - amount
+        - currency
+        - provider
+        - status
+        - created_at
+      properties:
+        payment_id:
+          type: integer
+          format: int64
+          readOnly: true
+        order_id:
+          type: integer
+          format: int64
+          readOnly: true
+        payment_reference:
+          type: string
+          maxLength: 100
+          readOnly: true
+        webhook_event_id:
+          type: string
+          maxLength: 100
+          nullable: true
+          readOnly: true
+          description: Maps to PAYMENTS.webhook_event_id.
+        amount:
+          type: number
+          multipleOf: 0.01
+          minimum: 0.01
+          readOnly: true
+        currency:
+          type: string
+          minLength: 3
+          maxLength: 3
+          readOnly: true
+          description: Maps to PAYMENTS.currency (CHAR(3)).
+        provider:
+          type: string
+          maxLength: 50
+          readOnly: true
+          description: Maps to PAYMENTS.provider.
+        status:
+          type: string
+          readOnly: true
+          description: Maps to PAYMENTS.payment_status.
+          enum: [PENDING, VERIFIED, FAILED, REFUNDED]
+        paid_at:
+          type: string
+          format: date-time
+          nullable: true
+          readOnly: true
+        created_at:
+          type: string
+          format: date-time
+          readOnly: true
+
+    PaymentWebhook:
+      type: object
+      required:
+        - event_id
+        - payment_reference
+        - order_id
+        - amount
+        - currency
+        - status
+      properties:
+        event_id:
+          type: string
+          minLength: 1
+          maxLength: 100
+          description: Must match X-PayLab-Event-Id and be unique.
+        payment_reference:
+          type: string
+          minLength: 1
+          maxLength: 100
+        order_id:
+          type: integer
+          format: int64
+        amount:
+          type: number
+          multipleOf: 0.01
+          minimum: 0
+          exclusiveMinimum: true
+        currency:
+          type: string
+          minLength: 3
+          maxLength: 3
+        status:
+          type: string
+          enum: [SUCCESS, FAILED]
+
+    Review:
+      type: object
+      properties:
+        review_id:
+          type: integer
+          format: int64
+          readOnly: true
+        product_id:
+          type: integer
+          format: int64
+          readOnly: true
+        customer_id:
+          type: integer
+          format: int64
+          readOnly: true
+        order_item_id:
+          type: integer
+          format: int64
+          readOnly: true
+        rating:
+          type: integer
+          minimum: 1
+          maximum: 5
+        review_text:
+          type: string
+          maxLength: 2000
+          description: Maps to REVIEWS.review_text.
+        created_at:
+          type: string
+          format: date-time
+          readOnly: true
+        updated_at:
+          type: string
+          format: date-time
+          readOnly: true
+
+    ReviewCreate:
+      type: object
+      required: [order_item_id, rating]
+      properties:
+        order_item_id:
+          type: integer
+          format: int64
+        rating:
+          type: integer
+          minimum: 1
+          maximum: 5
+        review_text:
+          type: string
+          maxLength: 2000
+
+    CouponCreate:
+      type: object
+      required:
+        - coupon_code
+        - discount_type
+        - discount_value
+        - max_uses
+        - start_at
+        - expires_at
+      properties:
+        coupon_code:
+          type: string
+          minLength: 3
+          maxLength: 50
+        discount_type:
+          type: string
+          enum: [PERCENTAGE, FIXED_AMOUNT]
+        discount_value:
+          type: number
+          multipleOf: 0.01
+          minimum: 0.01
+          description: Percentage discounts must not exceed 100.
+        max_uses:
+          type: integer
+          minimum: 1
+        start_at:
+          type: string
+          format: date-time
+        expires_at:
+          type: string
+          format: date-time
+          description: Must be later than start_at.
+        is_active:
+          type: boolean
+          default: true
+
+    AuditLog:
+      type: object
+      description: Read-only administrative audit log entry.
+      required:
+        - admin_id
+        - action
+        - entity_type
+        - created_at
+      properties:
+        audit_id:
+          type: integer
+          format: int64
+          readOnly: true
+        admin_id:
+          type: integer
+          format: int64
+        action:
+          type: string
+          maxLength: 100
+        entity_type:
+          type: string
+          maxLength: 50
+        entity_id:
+          type: integer
+          format: int64
+          nullable: true
+        reason:
+          type: string
+          nullable: true
+        ip_address:
+          type: string
+          maxLength: 45
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+          readOnly: true
+
+    SecurityEvent:
+      type: object
+      description: Security event record available to authorized Security Auditors.
+      required:
+        - event_type
+        - severity
+        - created_at
+      properties:
+        event_id:
+          type: integer
+          format: int64
+          readOnly: true
+        user_id:
+          type: integer
+          format: int64
+          nullable: true
+        event_type:
+          type: string
+          maxLength: 100
+        severity:
+          type: string
+          enum: [LOW, MEDIUM, HIGH, CRITICAL]
+        source_ip:
+          type: string
+          maxLength: 45
+          nullable: true
+        description:
+          type: string
+          nullable: true
+        endpoint:
+          type: string
+          maxLength: 255
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+          readOnly: true
+
+    Error:
+      type: object
+      properties:
+        error:
+          type: string
+        message:
+          type: string
+
+security:
+  - sessionAuth: []
