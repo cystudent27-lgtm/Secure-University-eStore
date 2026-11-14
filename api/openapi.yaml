@@ -305,13 +305,11 @@ paths:
       description: |
         Only approved vendors may create products.
 
-        Product images are supplied as external HTTPS URLs.
-        Direct image file uploads and XML/CSV catalogue imports
-        are not supported by this API.
-
-        Image URLs must use approved hostnames and pass secure
-        image-fetching validation. The backend must not fetch
-        arbitrary URLs directly.
+        Product images may be uploaded through the dedicated image endpoint
+        or supplied as external HTTPS URLs through the image-from-url endpoint.
+        Image URLs must use approved hostnames and pass secure image-fetching
+        validation. The backend must not fetch arbitrary URLs directly.
+        Catalogue files may be imported through the dedicated XML/CSV import endpoint.
       parameters:
         - $ref: '#/components/parameters/CSRFToken'
       requestBody:
@@ -333,6 +331,145 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
+
+  /vendor/products/import:
+    post:
+      tags: [Vendor, Administration]
+      summary: Import a product catalogue from XML or CSV
+      description: |
+        Allows an authenticated vendor to import catalogue records only for
+        that vendor, or an authorized administrator to import records within
+        the administrator's permissions. The backend validates every record,
+        rejects protected fields (including vendor ownership and approval
+        status), and reports rejected rows without exposing internal errors.
+        XML parsing must disable DTD and external entity processing to prevent
+        XXE. CSV values must be validated and safely handled to prevent
+        formula injection in later exports.
+      parameters:
+        - $ref: '#/components/parameters/CSRFToken'
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: XML or CSV catalogue file; server-side size and content validation applies.
+                format:
+                  type: string
+                  enum: [xml, csv]
+                  description: Optional explicit format; if omitted, the server determines it safely.
+      responses:
+        '202':
+          description: Import accepted for processing
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  import_id:
+                    type: string
+                  status:
+                    type: string
+                    enum: [QUEUED, PROCESSING, COMPLETED, COMPLETED_WITH_ERRORS, REJECTED]
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '413':
+          description: Uploaded file exceeds the configured size limit
+        '415':
+          description: Unsupported file type
+
+  /vendor/products/{productId}/image:
+    post:
+      tags: [Vendor]
+      summary: Upload an image for an owned product
+      description: |
+        Accepts an image file for a product owned by the authenticated vendor.
+        The backend checks file size, extension, actual content type, and image
+        decoding; stores the file outside executable web roots; and generates
+        a safe server-controlled filename. Authorization and ownership are
+        checked before the image is associated with the product.
+      parameters:
+        - $ref: '#/components/parameters/ProductId'
+        - $ref: '#/components/parameters/CSRFToken'
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: Image file in an allowed image format.
+      responses:
+        '200':
+          description: Product image uploaded and associated successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  image_url:
+                    type: string
+                    format: uri
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '413':
+          description: Uploaded image exceeds the configured size limit
+        '415':
+          description: Unsupported or invalid image content
+
+  /vendor/products/{productId}/image-from-url:
+    post:
+      tags: [Vendor]
+      summary: Set a product image using an approved external HTTPS URL
+      description: |
+        Associates an external image URL with a product owned by the vendor.
+        The URL must use HTTPS and an approved hostname. The secure image
+        fetcher validates DNS resolution, redirects, resolved IP addresses,
+        response size, content type, and time limits to prevent SSRF.
+        Arbitrary URLs and internal or private network destinations are rejected.
+      parameters:
+        - $ref: '#/components/parameters/ProductId'
+        - $ref: '#/components/parameters/CSRFToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [image_url]
+              properties:
+                image_url:
+                  type: string
+                  format: uri
+                  pattern: '^https://'
+      responses:
+        '200':
+          description: Validated external image URL associated with the product
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '422':
+          description: URL rejected by hostname, network, or image validation policy
 
   /vendor/products/{productId}:
     patch:
@@ -530,18 +667,16 @@ paths:
         Vendors can access only order information related to their own
         products, according to their permissions.
 
-        Customers may periodically poll this authenticated REST endpoint
-        to retrieve updated order status.
+        This authenticated REST endpoint provides the current order status
+        and may be used for an initial status snapshot or recovery after a
+        WebSocket reconnect. Real-time status notifications are delivered
+        through the authenticated WebSocket interface documented in the
+        root-level x-websocket extension.
 
         Ownership and authorization must be checked on every request.
         The backend must not rely only on a client-supplied order ID.
-
-        Polling should stop when the order reaches a final state
-        (DELIVERED, CANCELLED, or REFUNDED) or when the customer
-        leaves the order page.
-
-        This endpoint is read-only and does not allow clients
-        to change order status.
+        This endpoint is read-only and does not allow clients to change
+        order status.
       parameters:
         - $ref: '#/components/parameters/OrderId'
       responses:
@@ -1042,6 +1177,48 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
+
+x-websocket:
+  description: |
+    OpenAPI 3.0 documents the REST interface; the following WebSocket channel
+    is specified here as a vendor extension because WebSocket operations are
+    not native OpenAPI 3.0 paths.
+  url:
+    development: ws://localhost/ws/orders
+    production: wss://<store-host>/ws/orders
+  authentication:
+    type: session-cookie
+    cookie: session
+    requirements:
+      - Require an authenticated session before accepting the connection.
+      - Validate the Origin header against the exact store origin.
+      - Use WSS in deployed environments.
+  subscription:
+    message:
+      type: subscribe
+      order_id: integer
+    authorization:
+      - Verify that the authenticated customer owns the requested order.
+      - For vendor subscriptions, expose only order items belonging to that vendor.
+      - Reject unauthorized or malformed subscriptions.
+  server_event:
+    type: order_status_updated
+    fields:
+      order_id: integer
+      status: string
+      updated_at: string
+    rules:
+      - Send only status updates the connected user is authorized to receive.
+      - Never accept a client message that directly changes an order state.
+      - Close or revalidate connections when the session expires or is revoked.
+  order_status_values:
+    - CREATED
+    - PENDING_PAYMENT
+    - PAID
+    - SHIPPED
+    - DELIVERED
+    - CANCELLED
+    - REFUNDED
 
 components:
 
