@@ -81,3 +81,13 @@ The Secure University e-Store OpenAPI specification, version 1.2.0, was successf
 No visible YAML parsing or validation errors were observed during this review.
 
 This validation confirms the specification's successful loading and visual structure only. It does not constitute runtime, backend, database, or security functional testing.
+
+## M1 API Coverage Update
+
+The OpenAPI 3.0.3 draft also documents:
+- `POST /vendor/products/import` for authorized XML and CSV catalogue imports.
+- `POST /vendor/products/{productId}/image` for product image uploads.
+- `POST /vendor/products/{productId}/image-from-url` for validated external HTTPS image URLs.
+- An `x-websocket` root extension describing the authenticated order-status WebSocket channel, subscription authorization, and event payload. OpenAPI 3.0 does not natively model WebSocket operations, so this interface is documented separately from REST paths.
+
+The YAML syntax was revalidated after these additions. This is an M1 API design draft; endpoint implementation and runtime testing are deferred to later milestones.

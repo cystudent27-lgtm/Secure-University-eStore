@@ -31,7 +31,7 @@ The team consists of two members with the instructor's approval.
 | System architecture and DFD | رتاج ثائر محمود صافي | ليان أحمد عبدالله البرماوي |
 | STRIDE threat analysis | ليان أحمد عبدالله البرماوي | رتاج ثائر محمود صافي |
 | OpenAPI specification | Both members | Both members |
-| Technology stack documentation | Both members | Both members |
+| Technology stack selection and documentation | Both members | Both members |
 | Document review and consistency checking | Both members | Both members |
 | PDF preparation and final submission packaging | Both members | Both members |
 
@@ -65,7 +65,7 @@ The team is responsible for preparing the following M1 deliverables:
 3. System Architecture and DFD document.
 4. STRIDE threat analysis.
 5. OpenAPI 3 specification draft.
-6. Technology stack documentation.
+6. Technology stack declaration (`M1_Technology_Stack.md`).
 7. Team work plan.
 8. PDF versions of the required documents.
 9. Git repository link or project archive.
