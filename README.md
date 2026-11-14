@@ -56,20 +56,23 @@ The repository will organize application code, API documentation, database scrip
 ## Development Approach
 
 All project components will be developed from scratch according to the approved project specification.
+The M1 planning baseline and selected technology stack are documented in
+`docs/M1/source/M1_Technology_Stack.md`. Implementation is scheduled for later milestones;
+this repository currently contains the M1 analysis and design deliverables, not a running store.
 
-Implementation details and technology selections will be documented as the project progresses.
-
-## Current Progress
+## Current Progress — M1
 
 - [x] Development environment prepared.
-- [x] Project directory created.
-- [x] Initial M1 documentation structure created.
-- [ ] Requirements analysis.
-- [ ] Database ERD design.
-- [ ] Architecture and Data Flow Diagram.
-- [ ] STRIDE threat analysis.
-- [ ] OpenAPI 3 draft.
-- [ ] Team work plan.
+- [x] Project directory and documentation structure created.
+- [x] Requirements analysis (FR01–FR12, security requirements, business rules, use cases, and order state machine).
+- [x] Database ERD and data classification.
+- [x] System architecture and purchase/payment DFD with trust boundaries.
+- [x] STRIDE threat analysis.
+- [x] OpenAPI 3 draft, including catalogue import, product image handling, and WebSocket interface documentation.
+- [x] Technology stack declared.
+- [x] Team work plan and M1 PDF deliverables prepared.
+
+**Milestone status:** M1 planning and design package prepared. Application implementation and runtime testing belong to subsequent milestones.
 
 ## Safety Notice
 
